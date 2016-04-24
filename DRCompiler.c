@@ -1,4 +1,4 @@
-// Hand-written S3 compiler in C
+// Hand-written DRCompiler compiler in C
 // Arturo Rodrigeuz-Veve
 #include <stdio.h>  // needed by I/O functions
 #include <stdlib.h> // needed by malloc and exit
@@ -36,6 +36,12 @@
 #define STRING 16
 #define QUOTE 17
 #define READINT 18
+#define WHILE 19
+#define SWAP 20
+#define BREAK 21
+#define COMMA 22
+#define REPEAT 23
+
 
 time_t timer;    // for asctime
 
@@ -50,7 +56,7 @@ void assignmentTail();
 // Global Variables
 
 // tokenImage used in error messages.  See consume function.
-char *tokenImage[19] =
+char *tokenImage[24] =
 {
   "<END>",
   "\"println\"",
@@ -70,7 +76,12 @@ char *tokenImage[19] =
   "\"print\"",
   "<STRING>",
   "\"",
-  "\"readint\""
+  "\"readint\"",
+  "\"while\"",
+  "\"swap\"",
+  "\"break\"",
+  "\",\"",
+  "\"repeat\""
 };
 
 char inFileName[MAX], outFileName[MAX], inputLine[MAX];
@@ -100,7 +111,7 @@ TOKEN *previousToken;
 
 //-----------------------------------------
 // Abnormal end.
-// Close files so S3.a has max info for debugging
+// Close files so DRCompiler.a has max info for debugging
 void abend(void)
 {
    fclose(inFile);
@@ -163,7 +174,7 @@ void getNextChar(void)
     // get next char from inputLine
     currentChar =  inputLine[currentColumnNumber++];
 
-    // in S3, test for single-line comment goes here
+    // in DRCompiler, test for single-line comment goes here
     if(sizeof(inputLine)> currentColumnNumber ){
 		if(currentChar=='/' && inputLine[currentColumnNumber]=='/' && currentToken-> kind !=STRING){
 			currentChar='\n';
@@ -265,6 +276,14 @@ TOKEN *getNextToken(void)
         t -> kind = PRINT;
       else if (!strcmp(t -> image, "readint"))
     	t -> kind= READINT;
+      else if (!strcmp(t -> image, "swap"))
+    	  t -> kind = SWAP;
+	  else if (!strcmp(t -> image, "while"))
+		t -> kind = WHILE;
+      else if (!strcmp(t -> image, "break"))
+		t -> kind = BREAK;
+      else if (!strcmp(t -> image, "repeat"))
+		t -> kind = REPEAT;
       else  // not a keyword so kind is ID
         t -> kind = ID;
     }
@@ -301,6 +320,9 @@ TOKEN *getNextToken(void)
           break;
         case '}':
           t -> kind = RIGHTBRACKET;
+          break;
+        case ',':
+          t -> kind = COMMA;
           break;
         default:
           t -> kind = ERROR;
@@ -446,10 +468,14 @@ char* getLabel(void)
    return strdup(lbuf);   // returns label in its own storage area
 }
 //-----------------------------------------
+void emitLabel(char *label){
+	fprintf(outFile,
+	       "%s:\n", label);
+}
+//-----------------------------------------
 void factor(void)
 {
     TOKEN *t;
-    char f[MAX];
     switch(currentToken -> kind)
     {
       case UNSIGNED:
@@ -652,7 +678,7 @@ void printArg(void)
 	switch(currentToken -> kind)
 	{
 	    TOKEN *t;
-	    char *temp[100];
+	    char* temp2[100];
 
 	    printf("%s\n",t -> image);
 	    char* label;
@@ -662,9 +688,9 @@ void printArg(void)
 			label=getLabel();
 			emitInstruction2("pc",label);
 			emitInstruction1("sout");
-			strcpy(temp,"^");
-			strcat(temp,label);
-			emitdw(temp,t -> image);
+			strcpy(temp2,"^");
+			strcat(temp2,label);
+			emitdw(temp2,t -> image);
 			break;
 		default:
 			expr();
@@ -679,8 +705,8 @@ void nullStatement(void)
 	consume(SEMICOLON);
 }
 //-----------------------------------------
-void statement(void);
-void statementList(void)
+void statement(char* exitLabel);
+void statementList(char* exitLabel)
 {
     switch(currentToken -> kind)
     {
@@ -689,12 +715,15 @@ void statementList(void)
       case SEMICOLON:
       case READINT:
       case PRINTLN:
-        statement();
-        statementList();
+      case WHILE:
+      case SWAP:
+      case REPEAT:
+        statement(exitLabel);
+        statementList(exitLabel);
         break;
       case PRINT:
-        statement();
-        statementList();
+        statement(exitLabel);
+        statementList(exitLabel);
         break;
       case END:
         ;
@@ -711,11 +740,49 @@ void statementList(void)
     }
 }
 //-----------------------------------------
+void whileStatement(void){
+	consume(WHILE);
+	char* label1 = getLabel();
+	emitLabel(label1);
+	consume(LEFTPAREN);
+	expr();
+	consume(RIGHTPAREN);
+	char* label2 =getLabel();
+	emitInstruction2("jz", label2);
+	statement(label2);
+	emitInstruction2("ja", label1);
+	emitLabel(label2);
+}
+//-----------------------------------------
+void breakStatement(char *exitLabel){
+	emitInstruction2("ja", exitLabel);
+	consume(BREAK);
+	consume(SEMICOLON);
+}
+//-----------------------------------------
 void compoundStatement(void)
 {
 	consume(LEFTBRACKET);
-	statementList();
+	statementList(NULL);
 	consume(RIGHTBRACKET);
+}
+//-----------------------------------------
+void swapStatement(void){
+	TOKEN *t;
+	consume(SWAP);
+	consume(LEFTPAREN);
+	t = currentToken;
+	consume(ID);
+	consume(COMMA);
+	emitInstruction2("pc", t -> image);
+	emitInstruction2("p", currentToken -> image);
+	emitInstruction2("pc", currentToken -> image);
+	emitInstruction2("p", t -> image);
+	emitInstruction1("stav");
+	emitInstruction1("stav");
+	consume(ID);
+	consume(RIGHTPAREN);
+	consume(SEMICOLON);
 }
 //-----------------------------------------
 void readintStatement(void){
@@ -736,7 +803,7 @@ void readintStatement(void){
 	consume(RIGHTPAREN);
 }
 //-----------------------------------------
-void statement(void)
+void statement(char *exitLabel)
 {
     switch(currentToken -> kind)
     {
@@ -758,6 +825,15 @@ void statement(void)
       case READINT:
     	readintStatement();
     	break;
+      case WHILE:
+    	whileStatement();
+    	break;
+      case BREAK:
+    	breakStatement(exitLabel);
+    	break;
+      case SWAP:
+    	swapStatement();
+    	break;
       default:
         displayErrorLoc();
         printf("Scanning %s, expecting statement\n",
@@ -765,10 +841,38 @@ void statement(void)
         abend();
     }
 }
+//------------------------------------------
+void repeatStatement(void){
+	switch(currentToken->kind){
+		char* label;
+		case REPEAT:
+			consume(REPEAT);
+			consume(LEFTPAREN);
+			label=getLabel();
+			enter(label);
+			emitInstruction2("pc",label);
+			expr();
+			emitInstruction1("stav");
+			consume(RIGHTPAREN);
+			switch( currentToken -> kind){
+				case LEFTBRACKET:
+					consume(LEFTBRACKET);
+					statementList(NULL);
+					consume(RIGHTBRACKET);
+					break;
+				default:
+					statementList(NULL);
+					break;
+			}
+			break;
+		default:
+			break;
+	}
+}
 //-----------------------------------------
 void program(void)
 {
-    statementList();
+    statementList(NULL);
     endCode();
 }
 //-----------------------------------------
@@ -780,7 +884,7 @@ void parse(void)
 //-----------------------------------------
 int main(int argc, char *argv[])
 {
-   printf("S3 compiler written by Arturo Rodriguez-Veve\n");
+   printf("DRCompiler compiler written by Arturo Rodriguez-Veve\n");
    if (!(argc == 2 || argc == 3))
    {
       printf("Incorrect number of command line args\n");
@@ -825,7 +929,7 @@ int main(int argc, char *argv[])
     fprintf(outFile, "; Arturo Rodriguez-Veve    %s",
        asctime(localtime(&timer)));
     fprintf(outFile,
-       "; Output from S3 compiler\n");
+       "; Output from DRCompiler compiler\n");
 
     parse();
 
